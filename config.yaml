@@ -1,0 +1,19 @@
+data_path: Qwen3-0.6B-gsm8k-sft-data.pt
+
+device: mps
+
+model:
+  model_name: Qwen/Qwen3-0.6B
+  tokenizer_name: Qwen/Qwen3-0.6B
+  torch_dtype: bfloat16
+
+training:
+  batch_size: 4
+  learning_rate: 5e-5
+  num_epochs: 5
+
+diffusion:
+  T: 512
+  beta_schedule:
+    start: 1e-4
+    end: 2e-2

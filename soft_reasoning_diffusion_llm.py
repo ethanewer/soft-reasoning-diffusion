@@ -3,7 +3,6 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
-from torch.types import Device
 from transformers.cache_utils import DynamicCache
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
@@ -17,11 +16,11 @@ class SoftReasoningDiffusionLLM(nn.Module):
         begin_thinking_token: str = "<think>",
         end_thinking_token: str = "</think>",
         eot_token: str = "<|im_end|>",
-        device: Optional[Device] = None,
         **model_kwargs,
     ) -> None:
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         self.begin_thinking_token = begin_thinking_token
         self.end_thinking_token = end_thinking_token
         self.begin_thinking_id = self.tokenizer.encode(begin_thinking_token)[0]
@@ -31,14 +30,13 @@ class SoftReasoningDiffusionLLM(nn.Module):
     def forward(
         self,
         input_ids: Optional[Tensor] = None,
-        input_embeds: Optional[Tensor] = None,
+        inputs_embeds: Optional[Tensor] = None,
         attention_mask: Optional[Tensor] = None,
         past_key_values: Optional[DynamicCache] = None,
     ) -> Tensor:
-        assert (input_ids is None) ^ (input_embeds is None)
         return self.model(
             input_ids=input_ids,
-            input_embeds=input_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             use_cache=past_key_values is not None,
@@ -50,14 +48,14 @@ class SoftReasoningDiffusionLLM(nn.Module):
 
     def denoise(
         self,
-        input_embeds: Tensor,
+        inputs_embeds: Tensor,
         attention_mask: Tensor,
         past_key_values: DynamicCache,
     ) -> Tensor:
         prev_seq_length = past_key_values.get_seq_length()
-        assert prev_seq_length + input_embeds.shape[1] == attention_mask.shape[1]
+        assert prev_seq_length + inputs_embeds.shape[1] == attention_mask.shape[1]
         logits = self(
-            input_embeds=input_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
         )
@@ -103,7 +101,7 @@ class SoftReasoningDiffusionLLM(nn.Module):
         for _ in range(num_denoising_steps):
             with torch.no_grad():
                 input_embeds = self.denoise(
-                    input_embeds=input_embeds,
+                    inputs_embeds=input_embeds,
                     attention_mask=attention_mask,
                     past_key_values=past_key_values,
                 )
