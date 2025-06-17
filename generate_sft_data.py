@@ -11,7 +11,9 @@ model_name = "Qwen/Qwen3-1.7B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
-    model_name, torch_dtype="auto", device_map="auto"
+    model_name, 
+    torch_dtype=torch.bfloat16, 
+    device_map="cuda",
 )
 embed_layer = model.get_input_embeddings()
 
@@ -30,7 +32,7 @@ question_text = [
     for messages in question_messages
 ]
 
-batch_size = 32
+batch_size = 64
 num_thinking_tokens = 1024
 
 sft_data = []
@@ -93,7 +95,7 @@ with torch.no_grad():
             )
 
         if i % (10 * batch_size) == 0:
-            torch.save(sft_data, "sft_data.pt")
+            torch.save(sft_data, f"{model_name}-gsm8k-sft_data.pt")
 
 
-torch.save(sft_data, "sft_data.pt")
+torch.save(sft_data, f"{model_name}-gsm8k-sft_data.pt")
