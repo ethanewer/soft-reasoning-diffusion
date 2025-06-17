@@ -7,13 +7,13 @@ from transformers import (
     DynamicCache,  # type: ignore
 )
 
-model_name = "Qwen/Qwen3-1.7B"
+model_name = "Qwen/Qwen3-0.6B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
     model_name,
     torch_dtype=torch.bfloat16,
-    device_map="cuda",
+    device_map="mps",
 )
 embed_layer = model.get_input_embeddings()
 
@@ -32,13 +32,13 @@ question_text = [
     for messages in question_messages
 ]
 
-batch_size = 64
-num_thinking_tokens = 1024
+batch_size = 8
+num_thinking_tokens = 256
 
 sft_data = []
 
 with torch.no_grad():
-    for i in trange(0, 4, batch_size, desc="Building SFT Data"):
+    for i in trange(0, 1024, batch_size, desc="Building SFT Data"):
         inputs = tokenizer(
             question_text[i : i + batch_size],
             padding=True,
@@ -94,7 +94,7 @@ with torch.no_grad():
             )
 
         if i % (25 * batch_size) == 0:
-            torch.save(sft_data, "Qwen3-1.7B-gsm8k-sft-data.pt")
+            torch.save(sft_data, "Qwen3-0.6B-gsm8k-sft-data.pt")
 
 
-torch.save(sft_data, "Qwen3-1.7B-gsm8k-sft-data.pt")
+torch.save(sft_data, "Qwen3-0.6B-gsm8k-sft-data.pt")

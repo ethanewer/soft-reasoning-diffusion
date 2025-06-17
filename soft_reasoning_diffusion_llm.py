@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
+from torch.types import Device
 from transformers.cache_utils import DynamicCache
 from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 from transformers.models.auto.tokenization_auto import AutoTokenizer
@@ -16,6 +17,7 @@ class SoftReasoningDiffusionLLM(nn.Module):
         begin_thinking_token: str = "<think>",
         end_thinking_token: str = "</think>",
         eot_token: str = "<|im_end|>",
+        device: Optional[Device] = None,
         **model_kwargs,
     ) -> None:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
@@ -43,7 +45,6 @@ class SoftReasoningDiffusionLLM(nn.Module):
         ).logits
 
     def embed_logits(self, logits: Tensor):
-        """Returns the next input embedding given `logits`."""
         probabilities = logits.float().softmax(dim=-1).to(self.model.dtype)
         return probabilities @ self.model.model.embed_tokens.weight
 
@@ -53,17 +54,15 @@ class SoftReasoningDiffusionLLM(nn.Module):
         attention_mask: Tensor,
         past_key_values: DynamicCache,
     ) -> Tensor:
-        """Denoises `input_embeds[:, 1:]`."""
         prev_seq_length = past_key_values.get_seq_length()
         assert prev_seq_length + input_embeds.shape[1] == attention_mask.shape[1]
         logits = self(
-            input_embeds=input_embeds[:, :-1],
-            attention_mask=attention_mask[:, :-1],
+            input_embeds=input_embeds,
+            attention_mask=attention_mask,
             past_key_values=past_key_values,
         )
         past_key_values.crop(prev_seq_length)
-        new_embeds = self.embed_logits(logits)
-        return torch.cat((input_embeds[:, :1], new_embeds))
+        return self.embed_logits(logits)
 
     def generate(
         self,
@@ -72,7 +71,6 @@ class SoftReasoningDiffusionLLM(nn.Module):
         num_denoising_steps: int = 128,
         **generation_kwargs,
     ) -> list[str]:
-        """Generates text using soft reasoning diffusion."""
         inputs = self.tokenizer(
             input_text,
             padding=True,
@@ -85,21 +83,22 @@ class SoftReasoningDiffusionLLM(nn.Module):
 
         # prefill input tokens
         with torch.no_grad():
-            thinking_tag_logits = self(
+            self(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 past_key_values=past_key_values,
             )[:, -1:]
 
         # diffusion soft thinking
-        rand_logits = torch.randn(
-            thinking_tag_logits.shape[0],
-            num_thinking_tokens - 1,
-            thinking_tag_logits.shape[2],
-            dtype=thinking_tag_logits.dtype,
-            device=thinking_tag_logits.device,
+        input_embeds = self.embed_logits(
+            torch.randn(
+                input_ids.shape[0],
+                num_thinking_tokens,
+                self.model.config.vocab_size,
+                dtype=self.model.dtype,
+                device=self.model.device,
+            )
         )
-        input_embeds = self.embed_logits(torch.cat((thinking_tag_logits, rand_logits)))
         attention_mask = F.pad(attention_mask, pad=(0, num_thinking_tokens), value=1)
         for _ in range(num_denoising_steps):
             with torch.no_grad():
