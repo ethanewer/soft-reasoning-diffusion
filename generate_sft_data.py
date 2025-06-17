@@ -1,6 +1,6 @@
 import torch
-from datasets import load_dataset
-from tqdm.notebook import trange
+from datasets import load_dataset  # type: ignore
+from tqdm import trange  # type: ignore
 from transformers import (
     AutoModelForCausalLM,  # type: ignore
     AutoTokenizer,  # type: ignore
@@ -83,6 +83,8 @@ with torch.no_grad():
             embeds.append(next_embeds.cpu())
 
         torch.cuda.empty_cache()
+        
+        embeds = torch.cat(embeds, dim=1)
 
         for j in range(input_ids.shape[0]):
             sft_data.append(
@@ -90,12 +92,12 @@ with torch.no_grad():
                     "input_ids": input_ids[
                         j, attention_mask[j, : input_ids.shape[1]] == 1
                     ].cpu(),
-                    "embeds": torch.cat(embeds, dim=1),
+                    "embeds": embeds[j],
                 }
             )
 
-        if i % (10 * batch_size) == 0:
-            torch.save(sft_data, f"{model_name}-gsm8k-sft_data.pt")
+        if i % (25 * batch_size) == 0:
+            torch.save(sft_data, f"Qwen3-1.7B-gsm8k-sft-data.pt")
 
 
-torch.save(sft_data, f"{model_name}-gsm8k-sft_data.pt")
+torch.save(sft_data, f"Qwen3-1.7B-gsm8k-sft-data.pt")
