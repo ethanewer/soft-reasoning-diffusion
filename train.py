@@ -128,7 +128,7 @@ def main():
         seen = 0
         inner_pbar = tqdm(
             data_loader,
-            desc=f"Epoch {epoch + 1}/{num_epochs} | Avg MSE: 0.000000",
+            desc=f"Epoch {epoch + 1}/{num_epochs}",
             leave=False,
         )
         for input_ids, attention_mask, target_embeds in inner_pbar:
@@ -146,7 +146,7 @@ def main():
             seen += batch_size
             avg_loss = running_loss / seen
             inner_pbar.set_description(
-                f"Epoch {epoch + 1}/{num_epochs} | Avg MSE: {avg_loss:.6f}"
+                f"Epoch {epoch + 1}/{num_epochs} | Avg MSE: {avg_loss:.4e}"
             )
 
 
