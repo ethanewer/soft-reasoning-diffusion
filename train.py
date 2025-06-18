@@ -4,12 +4,11 @@ import os
 import torch
 import torch.nn.functional as F
 import yaml  # type: ignore
+from accelerate import Accelerator  # type: ignore
+from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import Tensor, nn, optim
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm, trange  # type: ignore
-
-from accelerate import Accelerator
-from diffusers import DDPMScheduler
 from transformers.cache_utils import DynamicCache
 
 from soft_reasoning_diffusion_llm import SoftReasoningDiffusionLLM
@@ -45,12 +44,12 @@ def compute_metrics(true: Tensor, pred: Tensor) -> dict[str, float]:
     p = pred.detach().cpu().reshape(-1)
     diff = p - t
 
-    mse = float((diff ** 2).mean())
+    mse = float((diff**2).mean())
     mae = float(diff.abs().mean())
 
     mean_t = t.mean()
     ss_tot = ((t - mean_t) ** 2).sum()
-    ss_res = (diff ** 2).sum()
+    ss_res = (diff**2).sum()
     r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
 
     return {"mse": mse, "mae": mae, "r2": r2}
@@ -74,9 +73,14 @@ def compute_loss(
 
     # sample noise
     batch_size = target_embeds.size(0)
-    timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (batch_size,), device=input_ids.device)
+    timesteps = torch.randint(
+        0,
+        scheduler.config.num_train_timesteps,  # type: ignore
+        (batch_size,),
+        device=input_ids.device,
+    )
     noise = torch.randn_like(target_embeds)
-    noisy = scheduler.add_noise(target_embeds, noise, timesteps)
+    noisy = scheduler.add_noise(target_embeds, noise, timesteps)  # type: ignore
 
     # predict noise
     pred = model.denoise(
@@ -102,16 +106,25 @@ def evaluate(
         for input_ids, attention_mask, target_embeds in dataloader:
             input_ids = input_ids.to(device)
             target_embeds = target_embeds.to(device)
-            attention_mask = F.pad(attention_mask, (0, target_embeds.size(1)), value=1).to(device)
+            attention_mask = F.pad(
+                attention_mask, (0, target_embeds.size(1)), value=1
+            ).to(device)
 
             # sample a fixed timestep (e.g. last) for evaluation consistency
-            t = torch.tensor([scheduler.config.num_train_timesteps - 1] * target_embeds.size(0), device=device)
+            t = torch.tensor(
+                [scheduler.config.num_train_timesteps - 1] * target_embeds.size(0),  # type: ignore
+                device=device,
+            )
             noise = torch.randn_like(target_embeds)
-            noisy = scheduler.add_noise(target_embeds, noise, t)
+            noisy = scheduler.add_noise(target_embeds, noise, t)  # type: ignore
 
             # predict noise
             past_key_values = DynamicCache()
-            _ = model(input_ids=input_ids, attention_mask=attention_mask, past_key_values=past_key_values)[:, -1]
+            _ = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )[:, -1]
             pred = model.denoise(
                 inputs_embeds=noisy.to(target_embeds.dtype),
                 attention_mask=attention_mask,
@@ -169,7 +182,9 @@ def main():
     )
 
     model = SoftReasoningDiffusionLLM(**cfg["model"])
-    optimizer = optim.AdamW(model.parameters(), lr=float(cfg["training"]["learning_rate"]))
+    optimizer = optim.AdamW(
+        model.parameters(), lr=float(cfg["training"]["learning_rate"])
+    )
 
     # prepare everything
     model, optimizer, train_loader, test_loader = accelerator.prepare(
@@ -185,7 +200,7 @@ def main():
     for epoch in trange(num_epochs, desc="Training"):  # epochs start from 0
         running_loss = 0.0
         seen = 0
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", leave=False)
         for input_ids, attention_mask, target_embeds in pbar:
             optimizer.zero_grad()
             loss, pred, noise = compute_loss(
@@ -201,12 +216,12 @@ def main():
             bs = input_ids.size(0)
             running_loss += loss.item() * bs
             seen += bs
-            pbar.set_description(f"Train MSE: {running_loss/seen:.4e}")
+            pbar.set_description(f"Train MSE: {running_loss / seen:.4e}")
 
         # evaluate on test set
         test_metrics = evaluate(model, scheduler, test_loader, device)
         print(
-            f"\nEpoch {epoch+1} -> "
+            f"\nEpoch {epoch + 1} -> "
             f"Test MSE: {test_metrics['mse']:.4e}, "
             f"MAE: {test_metrics['mae']:.4e}, "
             f"R^2: {test_metrics['r2']:.4f}"
@@ -214,12 +229,15 @@ def main():
 
         # save checkpoint after each epoch
         if accelerator.is_main_process:
-            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pt")
-            accelerator.save({
-                "epoch": epoch+1,
-                "model_state_dict": accelerator.unwrap_model(model).state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-            }, ckpt_path)
+            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pt")
+            accelerator.save(
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": accelerator.unwrap_model(model).state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                },
+                ckpt_path,
+            )
             print(f"Checkpoint saved to {ckpt_path}")
 
     accelerator.wait_for_everyone()
