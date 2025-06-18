@@ -68,12 +68,12 @@ def compute_loss(
     with torch.no_grad():
         _ = model(
             input_ids=input_ids,
-            attention_mask=F.pad(attention_mask, (0, target_embeds.size(1)), value=1),
+            attention_mask=F.pad(attention_mask, (0, target_embeds.shape[1]), value=1),
             past_key_values=past_key_values,
         )[:, -1]
 
     # sample noise
-    batch_size = target_embeds.size(0)
+    batch_size = target_embeds.shape[0]
     timesteps = torch.randint(
         0,
         scheduler.config.num_train_timesteps,  # type: ignore
@@ -86,7 +86,7 @@ def compute_loss(
     # predict noise
     pred = model.denoise(
         inputs_embeds=noisy.to(target_embeds.dtype),
-        attention_mask=F.pad(attention_mask, (0, target_embeds.size(1)), value=1),
+        attention_mask=F.pad(attention_mask, (0, target_embeds.shape[1]), value=1),
         past_key_values=past_key_values,
     )
 
@@ -108,12 +108,12 @@ def evaluate(
             input_ids = input_ids.to(device)
             target_embeds = target_embeds.to(device)
             attention_mask = F.pad(
-                attention_mask, (0, target_embeds.size(1)), value=1
+                attention_mask, (0, target_embeds.shape[1]), value=1
             ).to(device)
 
             # sample a fixed timestep (e.g. last) for evaluation consistency
             t = torch.tensor(
-                [scheduler.config.num_train_timesteps - 1] * target_embeds.size(0),  # type: ignore
+                [scheduler.config.num_train_timesteps - 1] * target_embeds.shape[0],  # type: ignore
                 device=device,
             )
             noise = torch.randn_like(target_embeds)
@@ -214,7 +214,7 @@ def main() -> None:
             accelerator.backward(loss)
             optimizer.step()
 
-            bs = input_ids.size(0)
+            bs = input_ids.shape[0]
             running_loss += loss.item() * bs
             seen += bs
             pbar.set_description(f"Train MSE: {running_loss / seen:.4f}")
