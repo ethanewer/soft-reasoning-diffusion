@@ -1,5 +1,6 @@
 import argparse
 import os
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -27,16 +28,16 @@ class EmbeddingDataset(Dataset):
         return self.data[i]
 
 
-def collate_fn(batch: list[dict[str, Tensor]]) -> tuple[Tensor, Tensor, Tensor]:
+def collate_fn(batch: list[dict[str, Tensor]], pad_id: int) -> tuple[Tensor, Tensor, Tensor]:
     input_ids = nn.utils.rnn.pad_sequence(
         [example["input_ids"] for example in batch],
         batch_first=True,
-        padding_value=-1,
+        padding_value=pad_id,
         padding_side="left",
     )
-    attention_mask = (input_ids >= 0).long()
+    attention_mask = (input_ids != pad_id).long()
     embeds = torch.stack([example["embeds"] for example in batch])
-    return input_ids.relu(), attention_mask, embeds
+    return input_ids, attention_mask, embeds
 
 
 def compute_metrics(true: Tensor, pred: Tensor) -> dict[str, float]:
@@ -61,7 +62,7 @@ def compute_loss(
     input_ids: Tensor,
     attention_mask: Tensor,
     target_embeds: Tensor,
-):
+) -> tuple[Tensor, Tensor, Tensor]:
     # build cache
     past_key_values = DynamicCache()
     with torch.no_grad():
@@ -139,7 +140,7 @@ def evaluate(
     return compute_metrics(true, pred)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", type=str, help="Path to YAML config file")
     args = parser.parse_args()
@@ -165,13 +166,13 @@ def main():
         train_ds,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=partial(collate_fn, pad_id=model.tokenizer.pad_token_id),
     )
     test_loader = DataLoader(
         test_ds,
         batch_size=cfg["training"]["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=partial(collate_fn, pad_id=model.tokenizer.pad_token_id),
     )
 
     # scheduler, model, optimizer
@@ -216,14 +217,14 @@ def main():
             bs = input_ids.size(0)
             running_loss += loss.item() * bs
             seen += bs
-            pbar.set_description(f"Train MSE: {running_loss / seen:.4e}")
+            pbar.set_description(f"Train MSE: {running_loss / seen:.4f}")
 
         # evaluate on test set
         test_metrics = evaluate(model, scheduler, test_loader, device)
         print(
             f"\nEpoch {epoch + 1} -> "
-            f"Test MSE: {test_metrics['mse']:.4e}, "
-            f"MAE: {test_metrics['mae']:.4e}, "
+            f"Test MSE: {test_metrics['mse']:.4f}, "
+            f"MAE: {test_metrics['mae']:.4f}, "
             f"R^2: {test_metrics['r2']:.4f}"
         )
 
