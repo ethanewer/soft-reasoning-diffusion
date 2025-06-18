@@ -65,7 +65,7 @@ def compute_loss(
     input_ids: Tensor,
     attention_mask: Tensor,
     target_embeds: Tensor,
-) -> tuple[Tensor, Tensor, Tensor]:
+) -> Tensor:
     # build cache
     past_key_values = DynamicCache()
     with torch.no_grad():
@@ -94,7 +94,7 @@ def compute_loss(
     )
 
     loss = F.mse_loss(pred, noise)
-    return loss, pred, noise
+    return loss
 
 
 def evaluate(
@@ -106,37 +106,54 @@ def evaluate(
     model.eval()
     all_true = []
     all_pred = []
+
+    torch.manual_seed(0)
+
+    T = scheduler.config.num_train_timesteps  # type: ignore
+    timesteps = [
+        0,
+        T // 4,
+        T // 2,
+        3 * T // 4,
+        T - 1,
+    ]
+
     with torch.no_grad():
         for input_ids, attention_mask, target_embeds in dataloader:
             input_ids = input_ids.to(device)
             target_embeds = target_embeds.to(device)
             attention_mask = F.pad(
-                attention_mask, (0, target_embeds.shape[1]), value=1
+                attention_mask,
+                (0, target_embeds.shape[1]),
+                value=1,
             ).to(device)
 
-            # sample a fixed timestep (e.g. last) for evaluation consistency
-            t = torch.tensor(
-                [scheduler.config.num_train_timesteps - 1] * target_embeds.shape[0],  # type: ignore
-                device=device,
-            )
-            noise = torch.randn_like(target_embeds)
-            noisy = scheduler.add_noise(target_embeds, noise, t)  # type: ignore
+            for t in timesteps:
+                t_batch = torch.full(
+                    (target_embeds.size(0),),
+                    t,
+                    device=device,
+                    dtype=torch.long,
+                )
 
-            # predict noise
-            past_key_values = DynamicCache()
-            _ = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-            )[:, -1]
-            pred = model.denoise(
-                inputs_embeds=noisy.to(target_embeds.dtype),
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-            )
+                noise = torch.randn_like(target_embeds)
 
-            all_true.append(noise)
-            all_pred.append(pred)
+                noisy = scheduler.add_noise(target_embeds, noise, t_batch)  # type: ignore
+
+                past_key_values = DynamicCache()
+                _ = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                )[:, -1]
+                pred = model.denoise(
+                    inputs_embeds=noisy.to(target_embeds.dtype),
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                )
+
+                all_true.append(noise)
+                all_pred.append(pred)
 
     true = torch.cat(all_true, dim=0)
     pred = torch.cat(all_pred, dim=0)
@@ -201,13 +218,18 @@ def main() -> None:
     checkpoint_dir = cfg["training"].get("checkpoint_dir", "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # check
+    num_params = sum(p.numel() for p in model.parameters())
+    opt_params = sum(p.numel() for g in optimizer.param_groups for p in g["params"])
+    print(f"Model: {num_params:,}, Optimizer: {opt_params:,}")
+
     for epoch in trange(num_epochs, desc="Training"):
         running_loss = 0.0
         seen = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", leave=False)
         for input_ids, attention_mask, target_embeds in pbar:
             optimizer.zero_grad()
-            loss, pred, noise = compute_loss(
+            loss = compute_loss(
                 model,
                 scheduler,
                 input_ids,
@@ -215,20 +237,31 @@ def main() -> None:
                 target_embeds,
             )
             accelerator.backward(loss)
+
+            # check
+            if seen == 0:
+                print(
+                    [
+                        p.grad.abs().mean().item()
+                        for p in model.parameters()
+                        if p.grad is not None
+                    ][:5]
+                )
+
             optimizer.step()
 
             bs = input_ids.shape[0]
             running_loss += loss.item() * bs
             seen += bs
-            pbar.set_description(f"Train MSE: {running_loss / seen:.4f}")
+            pbar.set_description(f"Train MSE: {running_loss / seen:.6f}")
 
         # evaluate on test set
         test_metrics = evaluate(model, scheduler, test_loader, device)
         print(
             f"\nEpoch {epoch + 1} -> "
-            f"Test MSE: {test_metrics['mse']:.4f}, "
-            f"MAE: {test_metrics['mae']:.4f}, "
-            f"R^2: {test_metrics['r2']:.4f}"
+            f"Test MSE: {test_metrics['mse']:.6f}, "
+            f"MAE: {test_metrics['mae']:.6f}, "
+            f"R^2: {test_metrics['r2']:.6f}"
         )
 
         # save checkpoint after each epoch
