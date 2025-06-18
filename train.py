@@ -217,12 +217,7 @@ def main() -> None:
     num_epochs = cfg["training"]["num_epochs"]
     checkpoint_dir = cfg["training"].get("checkpoint_dir", "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
-
-    # check
-    num_params = sum(p.numel() for p in model.parameters())
-    opt_params = sum(p.numel() for g in optimizer.param_groups for p in g["params"])
-    print(f"Model: {num_params:,}, Optimizer: {opt_params:,}")
-
+    
     for epoch in trange(num_epochs, desc="Training"):
         running_loss = 0.0
         seen = 0
@@ -237,16 +232,6 @@ def main() -> None:
                 target_embeds,
             )
             accelerator.backward(loss)
-
-            # check
-            if seen == 0:
-                print(
-                    [
-                        p.grad.abs().mean().item()
-                        for p in model.parameters()
-                        if p.grad is not None
-                    ][:5]
-                )
 
             optimizer.step()
 
