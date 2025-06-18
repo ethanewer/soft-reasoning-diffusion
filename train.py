@@ -178,17 +178,21 @@ def main():
     model.train()
 
     num_epochs = cfg["training"]["num_epochs"]
-    for epoch in trange(num_epochs, desc="Training"):
+    # checkpoint directory (optional override via config)
+    checkpoint_dir = cfg["training"].get("checkpoint_dir", "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    for epoch in trange(num_epochs, desc="Training"):  # epochs start from 0
         running_loss = 0.0
         seen = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
         for input_ids, attention_mask, target_embeds in pbar:
             optimizer.zero_grad()
             loss, pred, noise = compute_loss(
-                model, 
-                scheduler, 
-                input_ids, 
-                attention_mask, 
+                model,
+                scheduler,
+                input_ids,
+                attention_mask,
                 target_embeds,
             )
             accelerator.backward(loss)
@@ -207,6 +211,16 @@ def main():
             f"MAE: {test_metrics['mae']:.4e}, "
             f"R^2: {test_metrics['r2']:.4f}"
         )
+
+        # save checkpoint after each epoch
+        if accelerator.is_main_process:
+            ckpt_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pt")
+            accelerator.save({
+                "epoch": epoch+1,
+                "model_state_dict": accelerator.unwrap_model(model).state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            }, ckpt_path)
+            print(f"Checkpoint saved to {ckpt_path}")
 
     accelerator.wait_for_everyone()
 
