@@ -28,7 +28,10 @@ class EmbeddingDataset(Dataset):
         return self.data[i]
 
 
-def collate_fn(batch: list[dict[str, Tensor]], pad_id: int) -> tuple[Tensor, Tensor, Tensor]:
+def collate_fn(
+    batch: list[dict[str, Tensor]],
+    pad_id: int,
+) -> tuple[Tensor, Tensor, Tensor]:
     input_ids = nn.utils.rnn.pad_sequence(
         [example["input_ids"] for example in batch],
         batch_first=True,
@@ -153,6 +156,19 @@ def main() -> None:
     accelerator = Accelerator()
     device = accelerator.device
 
+    # scheduler, model, optimizer
+    scheduler = DDPMScheduler(
+        num_train_timesteps=int(cfg["diffusion"]["T"]),
+        beta_start=float(cfg["diffusion"]["beta_schedule"]["start"]),
+        beta_end=float(cfg["diffusion"]["beta_schedule"]["end"]),
+    )
+
+    model = SoftReasoningDiffusionLLM(**cfg["model"])
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=float(cfg["training"]["learning_rate"]),
+    )
+
     # full dataset
     full_data = torch.load(cfg["data_path"])
     dataset = EmbeddingDataset(full_data)
@@ -175,18 +191,6 @@ def main() -> None:
         collate_fn=partial(collate_fn, pad_id=model.tokenizer.pad_token_id),
     )
 
-    # scheduler, model, optimizer
-    scheduler = DDPMScheduler(
-        num_train_timesteps=int(cfg["diffusion"]["T"]),
-        beta_start=float(cfg["diffusion"]["beta_schedule"]["start"]),
-        beta_end=float(cfg["diffusion"]["beta_schedule"]["end"]),
-    )
-
-    model = SoftReasoningDiffusionLLM(**cfg["model"])
-    optimizer = optim.AdamW(
-        model.parameters(), lr=float(cfg["training"]["learning_rate"])
-    )
-
     # prepare everything
     model, optimizer, train_loader, test_loader = accelerator.prepare(
         model, optimizer, train_loader, test_loader
@@ -194,11 +198,10 @@ def main() -> None:
     model.train()
 
     num_epochs = cfg["training"]["num_epochs"]
-    # checkpoint directory (optional override via config)
     checkpoint_dir = cfg["training"].get("checkpoint_dir", "checkpoints")
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    for epoch in trange(num_epochs, desc="Training"):  # epochs start from 0
+    for epoch in trange(num_epochs, desc="Training"):
         running_loss = 0.0
         seen = 0
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}", leave=False)
