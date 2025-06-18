@@ -7,7 +7,7 @@ from transformers import (
     DynamicCache,  # type: ignore
 )
 
-model_name = "Qwen/Qwen3-0.6B"
+model_name = "Qwen/Qwen3-1.7B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForCausalLM.from_pretrained(
@@ -94,7 +94,7 @@ with torch.no_grad():
             )
 
         if i % (25 * batch_size) == 0:
-            torch.save(sft_data, "Qwen3-0.6B-gsm8k-sft-data.pt")
+            torch.save(sft_data, "Qwen3-1.7B-gsm8k-sft-data.pt")
 
 
-torch.save(sft_data, "Qwen3-0.6B-gsm8k-sft-data.pt")
+torch.save(sft_data, "Qwen3-1.7B-gsm8k-sft-data.pt")

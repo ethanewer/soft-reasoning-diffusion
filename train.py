@@ -5,9 +5,11 @@ import torch
 import torch.nn.functional as F
 import yaml  # type: ignore
 from torch import Tensor, nn, optim
-from torch.types import Device
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import tqdm, trange  # type: ignore
+
+from accelerate import Accelerator
+from diffusers import DDPMScheduler
 from transformers.cache_utils import DynamicCache
 
 from soft_reasoning_diffusion_llm import SoftReasoningDiffusionLLM
@@ -38,116 +40,175 @@ def collate_fn(batch: list[dict[str, Tensor]]) -> tuple[Tensor, Tensor, Tensor]:
     return input_ids.relu(), attention_mask, embeds
 
 
-def make_diffusion_schedule(cfg: dict[str, dict], device: Device) -> Tensor:
-    T = int(cfg["diffusion"]["T"])
-    beta_start = float(cfg["diffusion"]["beta_schedule"]["start"])
-    beta_end = float(cfg["diffusion"]["beta_schedule"]["end"])
-    betas = torch.linspace(beta_start, beta_end, T, device=device)
-    alphas = 1.0 - betas
-    return torch.cumprod(alphas, dim=0)
+def compute_metrics(true: Tensor, pred: Tensor) -> dict[str, float]:
+    t = true.detach().cpu().reshape(-1)
+    p = pred.detach().cpu().reshape(-1)
+    diff = p - t
+
+    mse = float((diff ** 2).mean())
+    mae = float(diff.abs().mean())
+
+    mean_t = t.mean()
+    ss_tot = ((t - mean_t) ** 2).sum()
+    ss_res = (diff ** 2).sum()
+    r2 = float(1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+
+    return {"mse": mse, "mae": mae, "r2": r2}
 
 
-def train_step(
+def compute_loss(
     model: SoftReasoningDiffusionLLM,
-    optimizer: optim.Optimizer,
+    scheduler: DDPMScheduler,
     input_ids: Tensor,
     attention_mask: Tensor,
     target_embeds: Tensor,
-    diffusion_schedule: Tensor,
-    device: Device,
 ):
-    input_ids = input_ids.to(device)
-    attention_mask = F.pad(
-        attention_mask,
-        (0, target_embeds.shape[1]),
-        value=1,
-    ).to(device)
-    target_embeds = target_embeds.to(device)
+    # build cache
     past_key_values = DynamicCache()
-
     with torch.no_grad():
-        model(
+        _ = model(
             input_ids=input_ids,
-            attention_mask=attention_mask,
+            attention_mask=F.pad(attention_mask, (0, target_embeds.size(1)), value=1),
             past_key_values=past_key_values,
         )[:, -1]
 
-    timesteps = torch.randint(
-        low=0,
-        high=len(diffusion_schedule),
-        size=(target_embeds.shape[0],),
-        device=device,
-    )
-    alpha_bars = diffusion_schedule[timesteps][:, None, None]
-
+    # sample noise
+    batch_size = target_embeds.size(0)
+    timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (batch_size,), device=input_ids.device)
     noise = torch.randn_like(target_embeds)
-    noisy_embeds = alpha_bars.sqrt() * target_embeds + (1 - alpha_bars).sqrt() * noise
-    pred_embeds = model.denoise(
-        inputs_embeds=noisy_embeds.to(target_embeds.dtype),
-        attention_mask=attention_mask,
+    noisy = scheduler.add_noise(target_embeds, noise, timesteps)
+
+    # predict noise
+    pred = model.denoise(
+        inputs_embeds=noisy.to(target_embeds.dtype),
+        attention_mask=F.pad(attention_mask, (0, target_embeds.size(1)), value=1),
         past_key_values=past_key_values,
     )
 
-    loss = F.mse_loss(pred_embeds, target_embeds)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-    return loss.detach()
+    loss = F.mse_loss(pred, noise)
+    return loss, pred, noise
+
+
+def evaluate(
+    model: SoftReasoningDiffusionLLM,
+    scheduler: DDPMScheduler,
+    dataloader: DataLoader,
+    device: torch.device,
+) -> dict[str, float]:
+    model.eval()
+    all_true = []
+    all_pred = []
+    with torch.no_grad():
+        for input_ids, attention_mask, target_embeds in dataloader:
+            input_ids = input_ids.to(device)
+            target_embeds = target_embeds.to(device)
+            attention_mask = F.pad(attention_mask, (0, target_embeds.size(1)), value=1).to(device)
+
+            # sample a fixed timestep (e.g. last) for evaluation consistency
+            t = torch.tensor([scheduler.config.num_train_timesteps - 1] * target_embeds.size(0), device=device)
+            noise = torch.randn_like(target_embeds)
+            noisy = scheduler.add_noise(target_embeds, noise, t)
+
+            # predict noise
+            past_key_values = DynamicCache()
+            _ = model(input_ids=input_ids, attention_mask=attention_mask, past_key_values=past_key_values)[:, -1]
+            pred = model.denoise(
+                inputs_embeds=noisy.to(target_embeds.dtype),
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+            )
+
+            all_true.append(noise)
+            all_pred.append(pred)
+
+    true = torch.cat(all_true, dim=0)
+    pred = torch.cat(all_pred, dim=0)
+    return compute_metrics(true, pred)
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("config", type=str, help="Path to YAML config file")
-    with open(p.parse_args().config, "r") as f:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config", type=str, help="Path to YAML config file")
+    args = parser.parse_args()
+
+    # load config
+    with open(args.config, "r") as f:
         cfg = yaml.safe_load(f)
 
-    device = cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    # accelerator
+    accelerator = Accelerator()
+    device = accelerator.device
 
-    dataset = EmbeddingDataset(torch.load(cfg["data_path"]))
+    # full dataset
+    full_data = torch.load(cfg["data_path"])
+    dataset = EmbeddingDataset(full_data)
 
-    data_loader = DataLoader(
-        dataset,
+    # train/test split
+    test_size = int(cfg["training"].get("test_size", 64))
+    train_size = len(dataset) - test_size
+    train_ds, test_ds = random_split(dataset, [train_size, test_size])
+
+    train_loader = DataLoader(
+        train_ds,
         batch_size=cfg["training"]["batch_size"],
         shuffle=True,
         collate_fn=collate_fn,
     )
-
-    diffusion_schedule = make_diffusion_schedule(cfg, device)
-
-    model = SoftReasoningDiffusionLLM(**cfg["model"]).to(device)
-
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=float(cfg["training"]["learning_rate"]),
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=cfg["training"]["batch_size"],
+        shuffle=False,
+        collate_fn=collate_fn,
     )
 
-    num_epochs = cfg["training"]["num_epochs"]
+    # scheduler, model, optimizer
+    scheduler = DDPMScheduler(
+        num_train_timesteps=int(cfg["diffusion"]["T"]),
+        beta_start=float(cfg["diffusion"]["beta_schedule"]["start"]),
+        beta_end=float(cfg["diffusion"]["beta_schedule"]["end"]),
+    )
 
+    model = SoftReasoningDiffusionLLM(**cfg["model"])
+    optimizer = optim.AdamW(model.parameters(), lr=float(cfg["training"]["learning_rate"]))
+
+    # prepare everything
+    model, optimizer, train_loader, test_loader = accelerator.prepare(
+        model, optimizer, train_loader, test_loader
+    )
+    model.train()
+
+    num_epochs = cfg["training"]["num_epochs"]
     for epoch in trange(num_epochs, desc="Training"):
         running_loss = 0.0
         seen = 0
-        inner_pbar = tqdm(
-            data_loader,
-            desc=f"Epoch {epoch + 1}/{num_epochs}",
-            leave=False,
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False)
+        for input_ids, attention_mask, target_embeds in pbar:
+            optimizer.zero_grad()
+            loss, pred, noise = compute_loss(
+                model, 
+                scheduler, 
+                input_ids, 
+                attention_mask, 
+                target_embeds,
+            )
+            accelerator.backward(loss)
+            optimizer.step()
+
+            bs = input_ids.size(0)
+            running_loss += loss.item() * bs
+            seen += bs
+            pbar.set_description(f"Train MSE: {running_loss/seen:.4e}")
+
+        # evaluate on test set
+        test_metrics = evaluate(model, scheduler, test_loader, device)
+        print(
+            f"\nEpoch {epoch+1} -> "
+            f"Test MSE: {test_metrics['mse']:.4e}, "
+            f"MAE: {test_metrics['mae']:.4e}, "
+            f"R^2: {test_metrics['r2']:.4f}"
         )
-        for input_ids, attention_mask, target_embeds in inner_pbar:
-            loss = train_step(
-                model=model,
-                optimizer=optimizer,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                target_embeds=target_embeds,
-                diffusion_schedule=diffusion_schedule,
-                device=device,
-            )
-            batch_size = input_ids.shape[0]
-            running_loss += loss.item() * batch_size
-            seen += batch_size
-            avg_loss = running_loss / seen
-            inner_pbar.set_description(
-                f"Epoch {epoch + 1}/{num_epochs} | Avg MSE: {avg_loss:.4e}"
-            )
+
+    accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
